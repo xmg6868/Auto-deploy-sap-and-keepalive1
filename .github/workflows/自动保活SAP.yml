@@ -105,7 +105,7 @@ jobs:
 
     - name: Determine CF API endpoint
       run: |
-        echo "CF_API=https://api.cf.us10-001.hana.ondemand.com" >> $GITHUB_ENV
+        echo "CF_API=https://api.cf.us10-003.hana.ondemand.com" >> $GITHUB_ENV
         echo "使用API端点: $CF_API (区域: US)"
 
     - name: Login to Cloud Foundry
