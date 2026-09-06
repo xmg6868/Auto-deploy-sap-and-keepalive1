@@ -62,7 +62,7 @@ env:
 
 jobs:
   deploy-app:
-    runs-on: Debian-latest
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code
