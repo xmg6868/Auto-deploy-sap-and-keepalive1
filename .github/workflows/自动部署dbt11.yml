@@ -1,4 +1,4 @@
-name: 自动部署ubuntu桌面到SAP
+name: 自动部署Debian桌面到SAP
 
 on:
   workflow_dispatch:  # 只允许手动触发
@@ -56,7 +56,8 @@ on:
         default: ''
 
 env:
-  DOCKER_IMAGE:${{ secrets.DOCKER_IMAGE || 'accetto/debian-vnc-xfce-chromium-g3:11' }}  MEMORY: ${{ secrets.MEMORY || '3060M' }}
+  DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE || 'accetto/debian-vnc-xfce-chromium-g3:11' }}
+  MEMORY: ${{ secrets.MEMORY || '3060M' }}
   DISK: ${{ secrets.DISK || '3060M' }}
 
 jobs:
