@@ -56,7 +56,7 @@ on:
         default: ''
 
 env:
-  DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE || 'accetto/debian-vnc-xfce-chromium-g3:11' }}
+  DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE || 'consol/debian-xfce-vnc' }}
   MEMORY: ${{ secrets.MEMORY || '3060M' }}
   DISK: ${{ secrets.DISK || '3060M' }}
 
