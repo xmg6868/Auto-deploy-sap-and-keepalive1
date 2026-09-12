@@ -1,9 +1,8 @@
-name: SAP Debian 11 极简桌面 - Debug
+name: SAP Debian 11 - 自动诊断部署
 
 on:
   workflow_dispatch:
     inputs:
-
       region:
         description: "SAP 区域"
         required: true
@@ -28,27 +27,21 @@ on:
         required: true
         default: "3060M"
 
-
 env:
   DOCKER_IMAGE: accetto/debian-vnc-xfce-g3:11
 
-
 jobs:
-
   deploy:
-
     runs-on: ubuntu-latest
 
     steps:
 
-      # ==========================================
-      # 安装 CF CLI
-      # ==========================================
-
+      # ============================================================
+      # 1. 安装 CF CLI
+      # ============================================================
       - name: Install CF CLI
         shell: bash
         run: |
-
           set -e
 
           wget -q -O - \
@@ -59,20 +52,17 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
 
           sudo apt-get update
-
           sudo apt-get install -y cf8-cli
 
           cf --version
 
 
-      # ==========================================
-      # SAP 区域
-      # ==========================================
-
+      # ============================================================
+      # 2. 选择 SAP 区域
+      # ============================================================
       - name: Select SAP Region
         shell: bash
         run: |
-
           set -e
 
           case "${{ github.event.inputs.region }}" in
@@ -91,12 +81,9 @@ jobs:
               echo "未知区域"
               exit 1
               ;;
-
           esac
 
-
           RANDOM_STR=$(date +%s%N | sha256sum | cut -c1-6)
-
 
           if [ -n "${{ github.event.inputs.app_name }}" ]; then
             APP_NAME="${{ github.event.inputs.app_name }}"
@@ -104,24 +91,22 @@ jobs:
             APP_NAME="${PREFIX}-${RANDOM_STR}"
           fi
 
-
           echo "CF_API=$CF_API" >> "$GITHUB_ENV"
           echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
 
+          echo "======================================"
+          echo "SAP API: $CF_API"
+          echo "APP:     $APP_NAME"
+          echo "IMAGE:   $DOCKER_IMAGE"
+          echo "======================================"
 
-          echo "API: $CF_API"
-          echo "APP: $APP_NAME"
-          echo "IMAGE: $DOCKER_IMAGE"
 
-
-      # ==========================================
-      # 登录
-      # ==========================================
-
+      # ============================================================
+      # 3. 登录 SAP
+      # ============================================================
       - name: Login SAP
         shell: bash
         run: |
-
           set -e
 
           cf login \
@@ -133,43 +118,53 @@ jobs:
           cf target
 
 
-      # ==========================================
-      # 删除旧应用
-      # ==========================================
-
+      # ============================================================
+      # 4. 删除旧应用
+      # ============================================================
       - name: Delete Old App
         shell: bash
         run: |
-
           set +e
 
           if cf app "$APP_NAME" >/dev/null 2>&1; then
-
-            echo "删除旧应用..."
+            echo "发现旧应用，删除..."
 
             cf stop "$APP_NAME" || true
 
-            cf delete "$APP_NAME" -f -r || true
+            cf delete "$APP_NAME" \
+              -f \
+              -r || true
 
             sleep 5
-
           fi
 
 
-      # ==========================================
-      # 推送 Docker
+      # ============================================================
+      # 5. Docker 部署
       #
       # 注意：
-      # 这里暂时使用 process health check
-      # ==========================================
-
+      # 不使用 --docker-port
+      # 不使用 route
+      # 不使用 port health check
+      # ============================================================
       - name: Push Debian
         shell: bash
+        continue-on-error: true
         run: |
+          echo "======================================"
+          echo "开始部署 Debian 11"
+          echo "======================================"
 
-          set -e
+          echo "Docker image:"
+          echo "$DOCKER_IMAGE"
 
-          echo "开始部署：$DOCKER_IMAGE"
+          echo "Memory:"
+          echo "${{ github.event.inputs.memory }}"
+
+          echo "Disk:"
+          echo "${{ github.event.inputs.disk }}"
+
+          echo "======================================"
 
           cf push "$APP_NAME" \
             --docker-image "$DOCKER_IMAGE" \
@@ -178,185 +173,139 @@ jobs:
             -k "${{ github.event.inputs.disk }}" \
             --health-check-type process
 
+          echo "cf push 执行结束"
 
-      # ==========================================
-      # 查看第一次启动结果
-      # ==========================================
 
-      - name: Inspect Initial Start
+      # ============================================================
+      # 6. 等待容器
+      # ============================================================
+      - name: Wait Container
         shell: bash
         run: |
+          echo "等待容器启动..."
 
-          set +e
+          sleep 5
 
-          echo
-          echo "=========================================="
-          echo "第一次启动后状态"
-          echo "=========================================="
+          for i in 1 2 3 4 5 6
+          do
+            echo "--------------------------------------"
+            echo "检查 $i/6"
+            echo "--------------------------------------"
 
-          cf app "$APP_NAME"
+            cf app "$APP_NAME" || true
 
-          echo
-          echo "=========================================="
-          echo "最近日志"
-          echo "=========================================="
-
-          cf logs "$APP_NAME" --recent
-
-          echo
-          echo "=========================================="
-          echo "环境变量"
-          echo "=========================================="
-
-          cf env "$APP_NAME"
-
-          echo
-          echo "=========================================="
-          echo "应用事件"
-          echo "=========================================="
-
-          cf events "$APP_NAME"
+            sleep 5
+          done
 
 
-      # ==========================================
-      # 如果崩溃，尝试一次重新启动
-      # ==========================================
-
-      - name: Restart Once
+      # ============================================================
+      # 7. 获取 CF Events
+      # ============================================================
+      - name: Get Events
         shell: bash
         run: |
+          echo "======================================"
+          echo "CF EVENTS"
+          echo "======================================"
 
-          set +e
-
-          echo
-          echo "=========================================="
-          echo "尝试重新启动一次"
-          echo "=========================================="
-
-          cf restart "$APP_NAME"
-
-          sleep 15
-
-          echo
-          echo "=========================================="
-          echo "重启后状态"
-          echo "=========================================="
-
-          cf app "$APP_NAME"
-
-          echo
-          echo "=========================================="
-          echo "重启后日志"
-          echo "=========================================="
-
-          cf logs "$APP_NAME" --recent
+          cf events "$APP_NAME" || true
 
 
-      # ==========================================
-      # 获取域名
-      # ==========================================
-
-      - name: Get Domain
+      # ============================================================
+      # 8. 获取最近日志
+      # ============================================================
+      - name: Get Recent Logs
         shell: bash
         run: |
+          echo "======================================"
+          echo "CF LOGS --RECENT"
+          echo "======================================"
 
-          set -e
-
-          DOMAIN=$(cf domains | \
-            awk '
-              NR > 3 &&
-              $1 != "" &&
-              $1 !~ /^apps\.internal$/ {
-                print $1
-                exit
-              }
-            ')
+          cf logs "$APP_NAME" --recent || true
 
 
-          if [ -z "$DOMAIN" ]; then
-
-            echo "无法获取域名"
-
-            cf domains
-
-            exit 1
-
-          fi
-
-
-          echo "DOMAIN=$DOMAIN" >> "$GITHUB_ENV"
-
-          echo "DOMAIN=$DOMAIN"
-
-
-      # ==========================================
-      # 创建 Route
-      # ==========================================
-
-      - name: Create Route
+      # ============================================================
+      # 9. 获取应用环境
+      # ============================================================
+      - name: Get Environment
         shell: bash
         run: |
+          echo "======================================"
+          echo "CF ENV"
+          echo "======================================"
 
-          set +e
-
-          cf create-route "$DOMAIN" \
-            --hostname "$APP_NAME"
-
-          echo "Route:"
-          echo "https://${APP_NAME}.${DOMAIN}"
+          cf env "$APP_NAME" || true
 
 
-      # ==========================================
-      # 映射 6901
-      # ==========================================
-
-      - name: Map noVNC
+      # ============================================================
+      # 10. 获取完整应用状态
+      # ============================================================
+      - name: Get App Status
         shell: bash
         run: |
+          echo "======================================"
+          echo "CF APP"
+          echo "======================================"
 
-          set +e
-
-          cf map-route "$APP_NAME" "$DOMAIN" \
-            --hostname "$APP_NAME" \
-            --destination-port 6901
-
-          echo "noVNC route mapped to 6901"
+          cf app "$APP_NAME" || true
 
 
-      # ==========================================
-      # 最终状态
-      # ==========================================
+      # ============================================================
+      # 11. 尝试重新启动
+      # ============================================================
+      - name: Restart App
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "======================================"
+          echo "尝试重新启动"
+          echo "======================================"
 
-      - name: Final Status
+          cf restart "$APP_NAME" || true
+
+          sleep 10
+
+          echo "重新启动后的状态："
+
+          cf app "$APP_NAME" || true
+
+          echo "重新启动后的日志："
+
+          cf logs "$APP_NAME" --recent || true
+
+
+      # ============================================================
+      # 12. 最终诊断
+      # ============================================================
+      - name: Final Diagnostic
         shell: bash
         run: |
-
-          set +e
+          echo
+          echo "=================================================="
+          echo "最终诊断信息"
+          echo "=================================================="
 
           echo
-          echo "=========================================="
-          echo "最终状态"
-          echo "=========================================="
-
-          cf app "$APP_NAME"
+          echo "========== APP =========="
+          cf app "$APP_NAME" || true
 
           echo
-          echo "=========================================="
-          echo "最近 200 行日志"
-          echo "=========================================="
-
-          cf logs "$APP_NAME" --recent
+          echo "========== EVENTS =========="
+          cf events "$APP_NAME" || true
 
           echo
-          echo "=========================================="
-          echo "应用事件"
-          echo "=========================================="
-
-          cf events "$APP_NAME"
+          echo "========== LOGS =========="
+          cf logs "$APP_NAME" --recent || true
 
           echo
-          echo "=========================================="
-          echo "访问地址"
-          echo "=========================================="
+          echo "========== ENV =========="
+          cf env "$APP_NAME" || true
 
-          echo "https://${APP_NAME}.${DOMAIN}"
+          echo
+          echo "=================================================="
+          echo "APP NAME: $APP_NAME"
+          echo "DOCKER:   $DOCKER_IMAGE"
+          echo "=================================================="
+
+          echo
+          echo "如果仍然 crashed，重点看上面的 CF LOGS。"
