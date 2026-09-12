@@ -8,17 +8,23 @@ permissions:
   packages: write
 
 env:
+  CF_API: https://api.cf.us10-003.hana.ondemand.com
+  CF_DOMAIN: cfapps.us10-003.hana.ondemand.com
+
   BASE_IMAGE: accetto/debian-vnc-xfce-g3:11
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/debian11-xfce-sap
+
+  MEMORY: 3060M
+  DISK: 3060M
 
 jobs:
 
   # ============================================================
-  # 第一阶段：构建 Debian 11 XFCE 镜像
+  # 第一阶段：构建 Debian 11 XFCE + noVNC 镜像
   # ============================================================
 
   build:
-
+    name: 构建 Debian 11 XFCE noVNC
     runs-on: ubuntu-latest
 
     steps:
@@ -39,112 +45,90 @@ jobs:
         shell: bash
         run: |
 
+          set -e
+
           cat > Dockerfile <<'EOF'
 
           FROM accetto/debian-vnc-xfce-g3:11
 
           USER root
 
-          # ----------------------------------------------------
-          # 基础目录权限
-          # ----------------------------------------------------
+          # ====================================================
+          # 基础环境
+          # ====================================================
 
-          RUN mkdir -p /dockerstartup \
-              && mkdir -p /tmp \
-              && chmod 1777 /tmp
-
-
-          # ----------------------------------------------------
-          # 修复 dockerstartup 目录权限
-          # ----------------------------------------------------
-
-          RUN chmod 777 /dockerstartup || true
-
-
-          # ----------------------------------------------------
-          # 修复 accetto 启动脚本可能需要使用的文件
-          # ----------------------------------------------------
-
-          RUN if [ -f /dockerstartup/.initial_sudo_password ]; then \
-                chmod 666 /dockerstartup/.initial_sudo_password || true; \
-              else \
-                touch /dockerstartup/.initial_sudo_password && \
-                chmod 666 /dockerstartup/.initial_sudo_password; \
-              fi
-
-
-          # ----------------------------------------------------
-          # 确保启动脚本可执行
-          # ----------------------------------------------------
-
-          RUN if [ -f /dockerstartup/startup.sh ]; then \
-                chmod 755 /dockerstartup/startup.sh; \
-              fi
-
-
-          RUN if [ -f /dockerstartup/vnc_startup.sh ]; then \
-                chmod 755 /dockerstartup/vnc_startup.sh; \
-              fi
-
-
-          # ----------------------------------------------------
-          # XFCE / VNC 配置
-          # ----------------------------------------------------
+          ENV LANG=C.UTF-8
+          ENV LC_ALL=C.UTF-8
 
           ENV VNC_RESOLUTION=1024x768
           ENV VNC_COL_DEPTH=16
           ENV VNC_VIEW_ONLY=false
           ENV VNC_PW=headless
 
-
-          # ----------------------------------------------------
-          # noVNC
-          # ----------------------------------------------------
-
+          # noVNC HTTP/WebSocket
           ENV NOVNC_PORT=6901
 
 
-          # ----------------------------------------------------
-          # locale
-          # ----------------------------------------------------
+          # ====================================================
+          # 权限
+          # ====================================================
 
-          ENV LANG=C.UTF-8
-          ENV LC_ALL=C.UTF-8
+          RUN mkdir -p /tmp \
+              && chmod 1777 /tmp
+
+          RUN if [ -d /dockerstartup ]; then \
+                chmod 755 /dockerstartup || true; \
+              fi
+
+          RUN if [ -f /dockerstartup/startup.sh ]; then \
+                chmod 755 /dockerstartup/startup.sh || true; \
+              fi
+
+          RUN if [ -f /dockerstartup/vnc_startup.sh ]; then \
+                chmod 755 /dockerstartup/vnc_startup.sh || true; \
+              fi
 
 
-          # ----------------------------------------------------
-          # 非常重要
+          # ====================================================
+          # 重要：
           #
-          # 将 noVNC 端口暴露给 Cloud Foundry
+          # 基础镜像可能同时暴露 VNC 端口和 noVNC 端口。
           #
-          # CF 会识别 EXPOSE 6901
-          # 并把应用端口设置为 6901
+          # CF 如果没有指定 destination-port，
+          # 可能会把 HTTP Route 连接到 VNC 端口，
+          # VNC 返回：
           #
-          # 公网 Route 会自动映射到这个端口
-          # ----------------------------------------------------
+          # RFB 003.008
+          #
+          # 然后 CF Gorouter 就会出现：
+          #
+          # malformed HTTP status code "003.008"
+          #
+          # 因此这里保留 6901，并在 CF 部署阶段明确
+          # 使用 destination-port 6901。
+          # ====================================================
 
           EXPOSE 6901
 
 
-          # ----------------------------------------------------
-          # 保持 root
-          # ----------------------------------------------------
+          # ====================================================
+          # 启动原始 Accetto 启动脚本
+          # ====================================================
 
           USER root
-
-
-          # ----------------------------------------------------
-          # 使用基础镜像原本的启动脚本
-          # ----------------------------------------------------
 
           CMD ["/dockerstartup/startup.sh"]
 
           EOF
 
 
-          echo "================ Dockerfile ================"
+          echo "======================================"
+          echo "Dockerfile"
+          echo "======================================"
+
           cat Dockerfile
-          echo "============================================"
+
+          echo "======================================"
 
 
       # --------------------------------------------------------
@@ -168,7 +152,7 @@ jobs:
 
 
       # --------------------------------------------------------
-      # 构建并上传
+      # 构建并上传镜像
       # --------------------------------------------------------
 
       - name: Build and Push Image
@@ -196,24 +180,25 @@ jobs:
           echo "Docker 镜像构建完成"
           echo "======================================"
 
+          echo "镜像："
           echo "${{ env.IMAGE_NAME }}:latest"
+
+          echo "======================================"
 
 
   # ============================================================
-  # 第二阶段：部署 SAP Cloud Foundry
+  # 第二阶段：部署 SAP CF
   # ============================================================
 
   deploy:
-
+    name: 部署 SAP Debian 11 noVNC
     needs: build
-
     runs-on: ubuntu-latest
 
     steps:
 
-
       # --------------------------------------------------------
-      # 安装 CF CLI 8
+      # 安装 CF CLI
       # --------------------------------------------------------
 
       - name: 安装 CF CLI
@@ -221,6 +206,10 @@ jobs:
         run: |
 
           set -e
+
+          echo "======================================"
+          echo "安装 Cloud Foundry CLI"
+          echo "======================================"
 
           wget -q -O - \
             https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
@@ -233,42 +222,46 @@ jobs:
 
           sudo apt-get install -y cf8-cli
 
-
-          echo "======================================"
-          echo "CF CLI"
-          echo "======================================"
-
           cf --version
 
+          echo "======================================"
+
 
       # --------------------------------------------------------
-      # 生成应用名称
+      # 生成应用名称和 Route hostname
       # --------------------------------------------------------
 
-      - name: 准备应用名称
+      - name: 生成应用名称
         shell: bash
         run: |
 
           set -e
 
-          RANDOM_STR=$(date +%s%N | sha256sum | cut -c1-6)
+          RANDOM_STR=$(date +%s%N | sha256sum | cut -c1-8)
 
           APP_NAME="debian-sap-${RANDOM_STR}"
 
+          HOSTNAME="debian-sap-${RANDOM_STR}"
+
           echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
 
+          echo "HOSTNAME=$HOSTNAME" >> "$GITHUB_ENV"
 
           echo "======================================"
-          echo "应用名称：$APP_NAME"
+          echo "APP_NAME  = $APP_NAME"
+          echo "HOSTNAME  = $HOSTNAME"
           echo "======================================"
 
 
       # --------------------------------------------------------
-      # 登录 SAP
+      # 登录 SAP CF
       # --------------------------------------------------------
 
-      - name: 登录 SAP
+      - name: 登录 SAP Cloud Foundry
         shell: bash
+        env:
+          CF_USERNAME: ${{ secrets.EMAIL }}
+          CF_PASSWORD: ${{ secrets.PASSWORD }}
         run: |
 
           set -e
@@ -277,41 +270,61 @@ jobs:
           echo "登录 SAP Cloud Foundry"
           echo "======================================"
 
+          cf api "$CF_API"
 
-          cf login \
-            -a https://api.cf.us10-003.hana.ondemand.com \
-            -u "${{ secrets.EMAIL }}" \
-            -p "${{ secrets.PASSWORD }}" \
-            --skip-ssl-validation
-
+          cf auth \
+            "$CF_USERNAME" \
+            "$CF_PASSWORD"
 
           echo "======================================"
-          echo "当前目标"
+          echo "登录成功"
           echo "======================================"
 
           cf target
 
 
       # --------------------------------------------------------
-      # 删除同名旧应用
+      # 设置 Org / Space
       # --------------------------------------------------------
 
-      - name: 删除旧应用
+      - name: 设置 Org 和 Space
+        shell: bash
+        run: |
+
+          set -e
+
+          echo "======================================"
+          echo "设置 Org / Space"
+          echo "======================================"
+
+          cf target \
+            -o "0bce8417trial_0bce8417trial" \
+            -s "dev"
+
+          cf target
+
+          echo "======================================"
+
+
+      # --------------------------------------------------------
+      # 清理同名应用
+      # --------------------------------------------------------
+
+      - name: 清理旧应用
         shell: bash
         run: |
 
           set +e
 
-          echo "检查旧应用..."
-
+          echo "======================================"
+          echo "检查旧应用"
+          echo "======================================"
 
           if cf app "$APP_NAME" >/dev/null 2>&1; then
 
             echo "发现旧应用"
 
-            cf stop "$APP_NAME" || true
-
-            cf delete "$APP_NAME" -f -r || true
+            cf delete "$APP_NAME" -f -r
 
             sleep 5
 
@@ -321,73 +334,66 @@ jobs:
 
           fi
 
+          echo "======================================"
+
 
       # ========================================================
-      # 部署 Debian 11 XFCE + noVNC
+      # 部署 Docker
       #
-      # 这里是本次最重要的修改
+      # 注意：
       #
-      # 原来：
+      # 这里故意使用 --no-route
       #
-      # --no-route
+      # 因为后面要自己创建 Route，
+      # 然后明确：
       #
-      # 修改为：
+      # destination-port 6901
       #
-      # --random-route
-      #
-      # Dockerfile 已经：
-      #
-      # EXPOSE 6901
-      #
-      # 所以 CF 会自动将 Route 指向 6901
       # ========================================================
 
-      - name: 部署 Debian 11 XFCE noVNC
+      - name: 部署 Debian 11
         shell: bash
-        continue-on-error: true
         run: |
 
+          set -e
+
           echo "======================================"
-          echo "部署 Debian 11 XFCE + noVNC"
+          echo "部署 Debian 11 XFCE"
           echo "======================================"
 
-          echo "镜像："
-          echo "$IMAGE_NAME:latest"
+          echo "应用：$APP_NAME"
 
-          echo "应用："
-          echo "$APP_NAME"
+          echo "镜像：$IMAGE_NAME:latest"
 
-          echo "内存：3060M"
+          echo "内存：$MEMORY"
 
-          echo "磁盘：3060M"
+          echo "磁盘：$DISK"
 
           echo "noVNC：6901"
-
-          echo "公网 Route：自动生成"
 
           echo "======================================"
 
 
           cf push "$APP_NAME" \
             --docker-image "$IMAGE_NAME:latest" \
-            --random-route \
-            -m 3060M \
-            -k 3060M \
+            --no-route \
+            -m "$MEMORY" \
+            -k "$DISK" \
             --health-check-type process
 
 
           echo ""
-          echo "======================================"
-          echo "CF PUSH 已结束"
-          echo "======================================"
 
+          echo "======================================"
+          echo "Docker 部署完成"
+          echo "======================================"
 
           cf app "$APP_NAME"
 
 
-      # --------------------------------------------------------
-      # 等待启动
-      # --------------------------------------------------------
+      # ========================================================
+      # 等待容器启动
+      # ========================================================
 
       - name: 等待应用启动
         shell: bash
@@ -397,11 +403,8 @@ jobs:
           echo "等待应用启动"
           echo "======================================"
 
-
-          sleep 10
-
-
-          for i in 1 2 3 4 5 6 7 8 9 10; do
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12
+          do
 
             echo ""
             echo "========== 第 $i 次检查 =========="
@@ -414,178 +417,228 @@ jobs:
 
 
       # ========================================================
-      # 自动诊断
+      # 创建公网 Route
       # ========================================================
 
-      - name: 输出 APP 状态
+      - name: 创建 noVNC 公网 Route
+        shell: bash
+        run: |
+
+          set -e
+
+          echo "======================================"
+          echo "创建公网 Route"
+          echo "======================================"
+
+          echo "Domain:"
+          echo "$CF_DOMAIN"
+
+          echo "Hostname:"
+          echo "$HOSTNAME"
+
+          echo "======================================"
+
+
+          cf create-route \
+            "$CF_DOMAIN" \
+            --hostname "$HOSTNAME"
+
+
+          echo "======================================"
+          echo "Route 创建成功"
+          echo "======================================"
+
+
+      # ========================================================
+      # 关键步骤：
+      #
+      # 把公网 HTTP Route 明确映射到 6901
+      #
+      # 这一步解决：
+      #
+      # malformed HTTP status code "003.008"
+      #
+      # 因为：
+      #
+      # 003.008 = VNC RFB 协议
+      #
+      # 说明之前 HTTP Route 连接到了 VNC 端口。
+      # ========================================================
+
+      - name: 映射 noVNC 6901
+        shell: bash
+        run: |
+
+          set -e
+
+          echo "======================================"
+          echo "映射公网 Route -> 6901"
+          echo "======================================"
+
+          echo "APP:"
+          echo "$APP_NAME"
+
+          echo "DOMAIN:"
+          echo "$CF_DOMAIN"
+
+          echo "HOSTNAME:"
+          echo "$HOSTNAME"
+
+          echo "DESTINATION PORT:"
+          echo "6901"
+
+          echo "======================================"
+
+
+          cf map-route \
+            "$APP_NAME" \
+            "$CF_DOMAIN" \
+            --hostname "$HOSTNAME" \
+            --destination-port 6901
+
+
+          echo "======================================"
+          echo "6901 映射完成"
+          echo "======================================"
+
+
+      # ========================================================
+      # 等待 Route 生效
+      # ========================================================
+
+      - name: 等待 Route
+        shell: bash
+        run: |
+
+          echo "======================================"
+          echo "等待 Route 生效"
+          echo "======================================"
+
+          sleep 10
+
+          cf app "$APP_NAME"
+
+
+      # ========================================================
+      # 输出公网 noVNC 地址
+      # ========================================================
+
+      - name: 输出 noVNC 公网地址
         shell: bash
         run: |
 
           echo ""
+          echo "======================================"
+          echo "NO VNC 公网访问地址"
+          echo "======================================"
+
+          echo ""
+
+          echo "https://${HOSTNAME}.${CF_DOMAIN}/"
+
+          echo ""
 
           echo "======================================"
-          echo "APP STATUS"
+
+          echo "浏览器打开："
+
+          echo ""
+
+          echo "https://${HOSTNAME}.${CF_DOMAIN}/"
+
+          echo ""
+
           echo "======================================"
 
+          echo "注意："
+
+          echo "公网 HTTPS -> CF -> 容器 6901 -> noVNC"
+
+          echo "======================================"
+
+
+      # ========================================================
+      # 查看 APP 状态
+      # ========================================================
+
+      - name: 查看 APP 状态
+        shell: bash
+        run: |
+
+          echo ""
+          echo "======================================"
+          echo "CF APP STATUS"
+          echo "======================================"
 
           cf app "$APP_NAME" || true
 
 
-      # --------------------------------------------------------
-      # 输出 Events
-      # --------------------------------------------------------
+      # ========================================================
+      # 查看 Route
+      # ========================================================
 
-      - name: 输出 Events
+      - name: 查看 Route
         shell: bash
         run: |
 
           echo ""
+          echo "======================================"
+          echo "CF ROUTE"
+          echo "======================================"
 
+          cf app "$APP_NAME" || true
+
+          echo ""
+
+          cf routes || true
+
+
+      # ========================================================
+      # 查看 Events
+      # ========================================================
+
+      - name: 查看 Events
+        shell: bash
+        run: |
+
+          echo ""
           echo "======================================"
           echo "CF EVENTS"
           echo "======================================"
 
-
           cf events "$APP_NAME" || true
 
 
-      # --------------------------------------------------------
-      # 输出最近日志
-      # --------------------------------------------------------
+      # ========================================================
+      # 查看环境变量
+      # ========================================================
 
-      - name: 输出最近日志
+      - name: 查看环境变量
         shell: bash
         run: |
 
           echo ""
-
-          echo "======================================"
-          echo "CF RECENT LOGS"
-          echo "======================================"
-
-
-          cf logs "$APP_NAME" --recent || true
-
-
-      # --------------------------------------------------------
-      # 输出环境变量
-      # --------------------------------------------------------
-
-      - name: 输出环境变量
-        shell: bash
-        run: |
-
-          echo ""
-
           echo "======================================"
           echo "CF ENV"
           echo "======================================"
-
 
           cf env "$APP_NAME" || true
 
 
       # ========================================================
-      # 如果失败，尝试重启一次
+      # 查看最近日志
       # ========================================================
 
-      - name: 尝试重新启动
+      - name: 查看 CF Recent Logs
         shell: bash
-        continue-on-error: true
         run: |
 
           echo ""
-
           echo "======================================"
-          echo "尝试重新启动应用"
+          echo "CF RECENT LOGS"
           echo "======================================"
-
-
-          cf restart "$APP_NAME" || true
-
-
-          sleep 15
-
-
-          cf app "$APP_NAME" || true
-
-
-          echo ""
-
-          echo "======================================"
-          echo "重启后的日志"
-          echo "======================================"
-
 
           cf logs "$APP_NAME" --recent || true
-
-
-      # ========================================================
-      # 获取最终 Route
-      # ========================================================
-
-      - name: 获取 noVNC 公网地址
-        shell: bash
-        run: |
-
-          set +e
-
-
-          echo ""
-
-          echo "======================================"
-          echo "获取 noVNC 公网地址"
-          echo "======================================"
-
-
-          cf app "$APP_NAME"
-
-
-          echo ""
-
-          echo "======================================"
-          echo "解析 Route"
-          echo "======================================"
-
-
-          ROUTE=$(cf app "$APP_NAME" 2>/dev/null | \
-            sed -n 's/^routes:[[:space:]]*//p' | \
-            awk '{print $1}')
-
-
-          if [ -n "$ROUTE" ]; then
-
-            echo ""
-            echo "======================================"
-            echo "noVNC 公网访问地址"
-            echo "======================================"
-
-            echo "https://${ROUTE}/"
-
-            echo ""
-
-            echo "请在浏览器打开："
-
-            echo "https://${ROUTE}/"
-
-            echo ""
-
-            echo "======================================"
-
-            echo "ROUTE=$ROUTE" >> "$GITHUB_ENV"
-
-          else
-
-            echo ""
-            echo "======================================"
-            echo "没有获取到 Route"
-            echo "======================================"
-
-            echo "请检查："
-
-            cf app "$APP_NAME"
-
-          fi
 
 
       # ========================================================
@@ -596,28 +649,12 @@ jobs:
         shell: bash
         run: |
 
-          set +e
-
-
           echo ""
-
           echo "======================================"
           echo "最终状态"
           echo "======================================"
 
-
           cf app "$APP_NAME" || true
-
-
-          echo ""
-
-          echo "======================================"
-          echo "最终日志"
-          echo "======================================"
-
-
-          cf logs "$APP_NAME" --recent || true
-
 
           echo ""
 
@@ -625,27 +662,12 @@ jobs:
           echo "最终 noVNC 地址"
           echo "======================================"
 
+          echo ""
 
-          ROUTE=$(cf app "$APP_NAME" 2>/dev/null | \
-            sed -n 's/^routes:[[:space:]]*//p' | \
-            awk '{print $1}')
-
-
-          if [ -n "$ROUTE" ]; then
-
-            echo ""
-            echo "https://${ROUTE}/"
-            echo ""
-
-          else
-
-            echo "Route 未获取到"
-
-          fi
-
+          echo "https://${HOSTNAME}.${CF_DOMAIN}/"
 
           echo ""
 
           echo "======================================"
-          echo "部署结束"
+          echo "部署完成"
           echo "======================================"
