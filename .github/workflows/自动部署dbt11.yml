@@ -1,48 +1,146 @@
-name: SAP Debian 11 - 自动诊断部署
+name: SAP Debian 11 XFCE - CF 修正版
 
 on:
   workflow_dispatch:
-    inputs:
-      region:
-        description: "SAP 区域"
-        required: true
-        default: "US(free)"
-        type: choice
-        options:
-          - US(free)
-          - SG(free)
 
-      app_name:
-        description: "应用名称，留空自动生成"
-        required: false
-        default: ""
-
-      memory:
-        description: "内存"
-        required: true
-        default: "3060M"
-
-      disk:
-        description: "磁盘"
-        required: true
-        default: "3060M"
+permissions:
+  contents: read
+  packages: write
 
 env:
-  DOCKER_IMAGE: accetto/debian-vnc-xfce-g3:11
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/debian11-xfce-sap
+  BASE_IMAGE: accetto/debian-vnc-xfce-g3:11
 
 jobs:
-  deploy:
+
+  # ============================================================
+  # 第一阶段：制作 SAP CF 专用 Docker 镜像
+  # ============================================================
+  build-image:
+
     runs-on: ubuntu-latest
 
     steps:
 
-      # ============================================================
-      # 1. 安装 CF CLI
-      # ============================================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # ----------------------------------------------------------
+      # 创建 Dockerfile
+      # ----------------------------------------------------------
+      - name: Create Dockerfile
+        shell: bash
+        run: |
+          cat > Dockerfile <<'EOF'
+          FROM accetto/debian-vnc-xfce-g3:11
+
+          USER root
+
+          # ------------------------------------------------------
+          # SAP Cloud Foundry 兼容修复
+          # accetto 启动脚本需要写入 /dockerstartup
+          # ------------------------------------------------------
+
+          RUN mkdir -p /dockerstartup \
+              && chmod 777 /dockerstartup \
+              && find /dockerstartup -type f -exec chmod 755 {} \; || true
+
+          # 创建启动脚本需要的文件位置
+          RUN touch /dockerstartup/.initial_sudo_password \
+              && chmod 666 /dockerstartup/.initial_sudo_password
+
+          # 保证常见运行目录可写
+          RUN mkdir -p /tmp \
+              && chmod 1777 /tmp
+
+          # ------------------------------------------------------
+          # XFCE / noVNC 默认配置
+          # ------------------------------------------------------
+
+          ENV VNC_RESOLUTION=1024x768
+          ENV VNC_COL_DEPTH=16
+          ENV VNC_VIEW_ONLY=false
+          ENV VNC_PW=headless
+          ENV NOVNC_PORT=6901
+
+          # ------------------------------------------------------
+          # 只声明 noVNC Web 端口
+          # ------------------------------------------------------
+
+          EXPOSE 6901
+
+          USER 1001:1001
+
+          ENTRYPOINT ["/usr/bin/tini", "--"]
+
+          CMD ["/dockerstartup/startup.sh"]
+          EOF
+
+          echo "Dockerfile:"
+          cat Dockerfile
+
+
+      # ----------------------------------------------------------
+      # Docker Buildx
+      # ----------------------------------------------------------
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+
+      # ----------------------------------------------------------
+      # 登录 GHCR
+      # ----------------------------------------------------------
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # ----------------------------------------------------------
+      # 构建并上传
+      # ----------------------------------------------------------
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+      - name: Show Image
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "Docker Image"
+          echo "======================================"
+          echo "${IMAGE_NAME}:latest"
+
+
+  # ============================================================
+  # 第二阶段：部署 SAP
+  # ============================================================
+  deploy:
+
+    needs: build-image
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ----------------------------------------------------------
+      # 安装 CF CLI
+      # ----------------------------------------------------------
       - name: Install CF CLI
         shell: bash
         run: |
-          set -e
 
           wget -q -O - \
             https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
@@ -52,65 +150,40 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/cloudfoundry-cli.list
 
           sudo apt-get update
+
           sudo apt-get install -y cf8-cli
 
           cf --version
 
 
-      # ============================================================
-      # 2. 选择 SAP 区域
-      # ============================================================
-      - name: Select SAP Region
+      # ----------------------------------------------------------
+      # 生成应用名称
+      # ----------------------------------------------------------
+      - name: Prepare
         shell: bash
         run: |
-          set -e
-
-          case "${{ github.event.inputs.region }}" in
-
-            "US(free)")
-              CF_API="https://api.cf.us10-003.hana.ondemand.com"
-              PREFIX="debian-us"
-              ;;
-
-            "SG(free)")
-              CF_API="https://api.cf.ap21.hana.ondemand.com"
-              PREFIX="debian-sg"
-              ;;
-
-            *)
-              echo "未知区域"
-              exit 1
-              ;;
-          esac
 
           RANDOM_STR=$(date +%s%N | sha256sum | cut -c1-6)
 
-          if [ -n "${{ github.event.inputs.app_name }}" ]; then
-            APP_NAME="${{ github.event.inputs.app_name }}"
-          else
-            APP_NAME="${PREFIX}-${RANDOM_STR}"
-          fi
+          APP_NAME="debian-sap-${RANDOM_STR}"
 
-          echo "CF_API=$CF_API" >> "$GITHUB_ENV"
           echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
 
           echo "======================================"
-          echo "SAP API: $CF_API"
-          echo "APP:     $APP_NAME"
-          echo "IMAGE:   $DOCKER_IMAGE"
+          echo "APP: $APP_NAME"
+          echo "IMAGE: $IMAGE_NAME:latest"
           echo "======================================"
 
 
-      # ============================================================
-      # 3. 登录 SAP
-      # ============================================================
+      # ----------------------------------------------------------
+      # 登录 SAP
+      # ----------------------------------------------------------
       - name: Login SAP
         shell: bash
         run: |
-          set -e
 
           cf login \
-            -a "$CF_API" \
+            -a https://api.cf.us10-003.hana.ondemand.com \
             -u "${{ secrets.EMAIL }}" \
             -p "${{ secrets.PASSWORD }}" \
             --skip-ssl-validation
@@ -118,194 +191,147 @@ jobs:
           cf target
 
 
-      # ============================================================
-      # 4. 删除旧应用
-      # ============================================================
+      # ----------------------------------------------------------
+      # 删除旧应用
+      # ----------------------------------------------------------
       - name: Delete Old App
         shell: bash
         run: |
+
           set +e
 
-          if cf app "$APP_NAME" >/dev/null 2>&1; then
-            echo "发现旧应用，删除..."
+          cf delete "$APP_NAME" -f -r
 
-            cf stop "$APP_NAME" || true
-
-            cf delete "$APP_NAME" \
-              -f \
-              -r || true
-
-            sleep 5
-          fi
+          true
 
 
-      # ============================================================
-      # 5. Docker 部署
-      #
-      # 注意：
-      # 不使用 --docker-port
-      # 不使用 route
-      # 不使用 port health check
-      # ============================================================
-      - name: Push Debian
+      # ----------------------------------------------------------
+      # 部署
+      # ----------------------------------------------------------
+      - name: Deploy Debian
         shell: bash
         continue-on-error: true
         run: |
+
           echo "======================================"
-          echo "开始部署 Debian 11"
-          echo "======================================"
-
-          echo "Docker image:"
-          echo "$DOCKER_IMAGE"
-
-          echo "Memory:"
-          echo "${{ github.event.inputs.memory }}"
-
-          echo "Disk:"
-          echo "${{ github.event.inputs.disk }}"
-
+          echo "部署 Debian 11 XFCE"
           echo "======================================"
 
           cf push "$APP_NAME" \
-            --docker-image "$DOCKER_IMAGE" \
+            --docker-image "$IMAGE_NAME:latest" \
             --no-route \
-            -m "${{ github.event.inputs.memory }}" \
-            -k "${{ github.event.inputs.disk }}" \
+            -m 3060M \
+            -k 3060M \
             --health-check-type process
 
-          echo "cf push 执行结束"
+          true
 
 
-      # ============================================================
-      # 6. 等待容器
-      # ============================================================
-      - name: Wait Container
+      # ----------------------------------------------------------
+      # 等待
+      # ----------------------------------------------------------
+      - name: Wait
         shell: bash
         run: |
-          echo "等待容器启动..."
 
-          sleep 5
-
-          for i in 1 2 3 4 5 6
-          do
-            echo "--------------------------------------"
-            echo "检查 $i/6"
-            echo "--------------------------------------"
-
-            cf app "$APP_NAME" || true
-
-            sleep 5
-          done
-
-
-      # ============================================================
-      # 7. 获取 CF Events
-      # ============================================================
-      - name: Get Events
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "CF EVENTS"
-          echo "======================================"
-
-          cf events "$APP_NAME" || true
-
-
-      # ============================================================
-      # 8. 获取最近日志
-      # ============================================================
-      - name: Get Recent Logs
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "CF LOGS --RECENT"
-          echo "======================================"
-
-          cf logs "$APP_NAME" --recent || true
-
-
-      # ============================================================
-      # 9. 获取应用环境
-      # ============================================================
-      - name: Get Environment
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "CF ENV"
-          echo "======================================"
-
-          cf env "$APP_NAME" || true
-
-
-      # ============================================================
-      # 10. 获取完整应用状态
-      # ============================================================
-      - name: Get App Status
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "CF APP"
-          echo "======================================"
+          sleep 15
 
           cf app "$APP_NAME" || true
 
 
-      # ============================================================
-      # 11. 尝试重新启动
-      # ============================================================
-      - name: Restart App
+      # ----------------------------------------------------------
+      # 获取域名
+      # ----------------------------------------------------------
+      - name: Get Domain
         shell: bash
-        continue-on-error: true
         run: |
+
+          set +e
+
+          DOMAIN=$(cf domains | \
+            awk '
+              NR > 3 &&
+              $1 != "" &&
+              $1 !~ /^apps\.internal$/ {
+                print $1
+                exit
+              }
+            ')
+
+          if [ -z "$DOMAIN" ]; then
+            echo "无法获取 CF 域名"
+            cf domains
+            exit 1
+          fi
+
+          echo "DOMAIN=$DOMAIN" >> "$GITHUB_ENV"
+
+          echo "CF DOMAIN:"
+          echo "$DOMAIN"
+
+
+      # ----------------------------------------------------------
+      # 创建 Route
+      # ----------------------------------------------------------
+      - name: Create Route
+        shell: bash
+        run: |
+
+          set +e
+
+          cf create-route "$DOMAIN" \
+            --hostname "$APP_NAME"
+
+          true
+
+
+      # ----------------------------------------------------------
+      # 映射 noVNC 6901
+      # ----------------------------------------------------------
+      - name: Map noVNC
+        shell: bash
+        run: |
+
+          set +e
+
+          cf map-route "$APP_NAME" "$DOMAIN" \
+            --hostname "$APP_NAME" \
+            --destination-port 6901
+
+          true
+
+
+      # ----------------------------------------------------------
+      # 最终状态
+      # ----------------------------------------------------------
+      - name: Final Status
+        shell: bash
+        run: |
+
+          echo
           echo "======================================"
-          echo "尝试重新启动"
+          echo "最终状态"
           echo "======================================"
-
-          cf restart "$APP_NAME" || true
-
-          sleep 10
-
-          echo "重新启动后的状态："
 
           cf app "$APP_NAME" || true
 
-          echo "重新启动后的日志："
+          echo
+          echo "======================================"
+          echo "最近日志"
+          echo "======================================"
 
           cf logs "$APP_NAME" --recent || true
 
-
-      # ============================================================
-      # 12. 最终诊断
-      # ============================================================
-      - name: Final Diagnostic
-        shell: bash
-        run: |
           echo
-          echo "=================================================="
-          echo "最终诊断信息"
-          echo "=================================================="
+          echo "======================================"
+          echo "访问地址"
+          echo "======================================"
+
+          echo "https://${APP_NAME}.${DOMAIN}"
 
           echo
-          echo "========== APP =========="
-          cf app "$APP_NAME" || true
+          echo "======================================"
+          echo "Docker Image"
+          echo "======================================"
 
-          echo
-          echo "========== EVENTS =========="
-          cf events "$APP_NAME" || true
-
-          echo
-          echo "========== LOGS =========="
-          cf logs "$APP_NAME" --recent || true
-
-          echo
-          echo "========== ENV =========="
-          cf env "$APP_NAME" || true
-
-          echo
-          echo "=================================================="
-          echo "APP NAME: $APP_NAME"
-          echo "DOCKER:   $DOCKER_IMAGE"
-          echo "=================================================="
-
-          echo
-          echo "如果仍然 crashed，重点看上面的 CF LOGS。"
+          echo "${IMAGE_NAME}:latest"
