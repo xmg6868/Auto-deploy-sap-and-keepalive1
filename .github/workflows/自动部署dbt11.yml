@@ -28,12 +28,8 @@ on:
         required: true
         default: "3060M"
 
-
 env:
-  # Debian 11 + XFCE + VNC + noVNC
-  # 不包含 Chromium，尽量降低资源占用
   DOCKER_IMAGE: accetto/debian-vnc-xfce-g3:11
-
 
 jobs:
 
@@ -43,19 +39,15 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # 1. 安装 Cloud Foundry CLI
-      # ============================================================
+      # =====================================================
+      # 1. 安装 CF CLI
+      # =====================================================
 
       - name: Install CF CLI
         shell: bash
         run: |
 
           set -e
-
-          echo "======================================"
-          echo "安装 Cloud Foundry CLI"
-          echo "======================================"
 
           wget -q -O - \
             https://packages.cloudfoundry.org/debian/cli.cloudfoundry.org.key \
@@ -68,13 +60,12 @@ jobs:
 
           sudo apt-get install -y cf8-cli
 
-          echo
           cf --version
 
 
-      # ============================================================
-      # 2. 设置 SAP 区域和应用名称
-      # ============================================================
+      # =====================================================
+      # 2. 选择 SAP 区域
+      # =====================================================
 
       - name: Select SAP Region
         shell: bash
@@ -82,49 +73,32 @@ jobs:
 
           set -e
 
-          echo "======================================"
-          echo "选择 SAP 区域"
-          echo "======================================"
-
           case "${{ github.event.inputs.region }}" in
 
             "US(free)")
-
               CF_API="https://api.cf.us10-003.hana.ondemand.com"
               PREFIX="debian-us"
-
               ;;
 
             "SG(free)")
-
               CF_API="https://api.cf.ap21.hana.ondemand.com"
               PREFIX="debian-sg"
-
               ;;
 
             *)
-
-              echo "错误：未知 SAP 区域"
+              echo "未知 SAP 区域"
               exit 1
-
               ;;
 
           esac
 
 
-          # ========================================================
           # 不使用 tr | head
-          # 避免：
-          #
-          # tr: write error: Broken pipe
-          #
-          # 直接使用 SHA256 生成随机字符串
-          # ========================================================
+          # 防止 Broken pipe
 
           RANDOM_STR=$(date +%s%N | sha256sum | cut -c1-6)
 
 
-          # 如果用户填写了应用名称，就使用用户名称
           if [ -n "${{ github.event.inputs.app_name }}" ]; then
 
             APP_NAME="${{ github.event.inputs.app_name }}"
@@ -140,38 +114,27 @@ jobs:
           echo "APP_NAME=$APP_NAME" >> "$GITHUB_ENV"
 
 
-          echo
           echo "======================================"
           echo "SAP API:"
           echo "$CF_API"
           echo
-          echo "应用名称:"
+          echo "APP:"
           echo "$APP_NAME"
           echo
-          echo "Docker:"
+          echo "IMAGE:"
           echo "$DOCKER_IMAGE"
-          echo
-          echo "内存:"
-          echo "${{ github.event.inputs.memory }}"
-          echo
-          echo "磁盘:"
-          echo "${{ github.event.inputs.disk }}"
           echo "======================================"
 
 
-      # ============================================================
+      # =====================================================
       # 3. 登录 SAP
-      # ============================================================
+      # =====================================================
 
-      - name: Login to SAP Cloud Foundry
+      - name: Login SAP
         shell: bash
         run: |
 
           set -e
-
-          echo "======================================"
-          echo "登录 SAP Cloud Foundry"
-          echo "======================================"
 
           cf login \
             -a "$CF_API" \
@@ -182,99 +145,47 @@ jobs:
           echo
           echo "登录成功"
 
-          echo
           cf target
 
 
-      # ============================================================
-      # 4. 显示当前 Org / Space
-      # ============================================================
+      # =====================================================
+      # 4. 删除旧应用
+      # =====================================================
 
-      - name: Check SAP Target
-        shell: bash
-        run: |
-
-          set -e
-
-          echo "======================================"
-          echo "当前 SAP Target"
-          echo "======================================"
-
-          cf target
-
-          echo
-          echo "组织："
-
-          cf orgs || true
-
-          echo
-          echo "空间："
-
-          cf spaces || true
-
-
-      # ============================================================
-      # 5. 检查 Docker 镜像
-      # ============================================================
-
-      - name: Check Docker Image
-        shell: bash
-        run: |
-
-          echo "======================================"
-          echo "Docker 镜像"
-          echo "======================================"
-
-          echo "$DOCKER_IMAGE"
-
-          echo
-          echo "Debian 11 极简 XFCE"
-          echo "noVNC Web 端口：6901"
-          echo "VNC 端口：5901"
-
-
-      # ============================================================
-      # 6. 删除同名旧应用
-      # ============================================================
-
-      - name: Remove Old App
+      - name: Delete Old App
         shell: bash
         run: |
 
           set +e
 
-          echo "======================================"
-          echo "检查旧应用"
-          echo "======================================"
+          echo "检查旧应用..."
 
           if cf app "$APP_NAME" >/dev/null 2>&1; then
 
-            echo
             echo "发现旧应用：$APP_NAME"
 
-            echo "停止旧应用..."
+            cf stop "$APP_NAME" || true
 
-            cf stop "$APP_NAME"
-
-            echo "删除旧应用..."
-
-            cf delete "$APP_NAME" -f -r
+            cf delete "$APP_NAME" -f -r || true
 
             sleep 5
 
-            echo "旧应用删除完成"
-
           else
 
-            echo
-            echo "没有发现同名旧应用"
+            echo "没有旧应用"
 
           fi
 
 
-      # ============================================================
-      # 7. 部署 Debian 11
-      # ============================================================
+      # =====================================================
+      # 5. 部署 Debian 11
+      #
+      # 关键修改：
+      #
+      # --health-check-type process
+      #
+      # 不让 CF 在启动阶段检查 5901/6901
+      # =====================================================
 
       - name: Push Debian 11
         shell: bash
@@ -283,39 +194,23 @@ jobs:
           set -e
 
           echo "======================================"
-          echo "开始部署 Debian 11"
+          echo "部署 Debian 11"
           echo "======================================"
-
-          echo
-          echo "应用：$APP_NAME"
-
-          echo
-          echo "镜像：$DOCKER_IMAGE"
-
-          echo
-          echo "内存：${{ github.event.inputs.memory }}"
-
-          echo
-          echo "磁盘：${{ github.event.inputs.disk }}"
-
-          echo
 
           cf push "$APP_NAME" \
             --docker-image "$DOCKER_IMAGE" \
             --no-route \
             -m "${{ github.event.inputs.memory }}" \
             -k "${{ github.event.inputs.disk }}" \
-            --health-check-type port
+            --health-check-type process
 
           echo
-          echo "======================================"
           echo "cf push 完成"
-          echo "======================================"
 
 
-      # ============================================================
-      # 8. 设置低资源 VNC 参数
-      # ============================================================
+      # =====================================================
+      # 6. 设置 VNC
+      # =====================================================
 
       - name: Configure VNC
         shell: bash
@@ -323,44 +218,48 @@ jobs:
 
           set -e
 
-          echo "======================================"
-          echo "设置极简 VNC"
-          echo "======================================"
-
+          echo "设置极简 VNC..."
 
           # 低分辨率
           cf set-env "$APP_NAME" \
             VNC_RESOLUTION \
             "1024x768"
 
-
-          # 16 bit 色深
+          # 低色深
           cf set-env "$APP_NAME" \
             VNC_COL_DEPTH \
             "16"
 
-
-          # 非只读
+          # 允许操作
           cf set-env "$APP_NAME" \
             VNC_VIEW_ONLY \
             "false"
 
+          # 默认 VNC 密码
+          cf set-env "$APP_NAME" \
+            VNC_PW \
+            "headless"
+
+          # noVNC
+          cf set-env "$APP_NAME" \
+            NOVNC_PORT \
+            "6901"
 
           echo
           echo "VNC_RESOLUTION=1024x768"
           echo "VNC_COL_DEPTH=16"
           echo "VNC_VIEW_ONLY=false"
-
+          echo "NOVNC_PORT=6901"
 
           echo
-          echo "重新部署环境变量..."
+          echo "重新部署..."
 
           cf restage "$APP_NAME"
 
 
-      # ============================================================
-      # 9. 获取 SAP 默认域
-      # ============================================================
+      # =====================================================
+      # 7. 获取 SAP 默认域
+      # =====================================================
 
       - name: Get SAP Domain
         shell: bash
@@ -368,10 +267,7 @@ jobs:
 
           set -e
 
-          echo "======================================"
-          echo "获取 SAP 默认域"
-          echo "======================================"
-
+          echo "获取 SAP 默认域..."
 
           DOMAIN=$(cf domains | \
             awk '
@@ -386,11 +282,7 @@ jobs:
 
           if [ -z "$DOMAIN" ]; then
 
-            echo
-            echo "错误：无法获取 SAP 默认域"
-
-            echo
-            echo "当前 Domains："
+            echo "无法获取 SAP 默认域"
 
             cf domains
 
@@ -403,49 +295,40 @@ jobs:
 
 
           echo
-          echo "SAP 默认域："
+          echo "DOMAIN:"
           echo "$DOMAIN"
 
 
-      # ============================================================
-      # 10. 创建 Web 路由
-      # ============================================================
+      # =====================================================
+      # 8. 创建 Route
+      # =====================================================
 
-      - name: Create Web Route
+      - name: Create Route
         shell: bash
         run: |
 
           set -e
 
-          echo "======================================"
-          echo "创建 Web Route"
-          echo "======================================"
-
+          echo "创建 Web Route..."
 
           cf create-route "$DOMAIN" \
             --hostname "$APP_NAME" || true
 
 
-          echo
-          echo "Route："
+      # =====================================================
+      # 9. 映射 noVNC 6901
+      #
+      # 重要：
+      # 不使用 --docker-port
+      # =====================================================
 
-          echo "https://${APP_NAME}.${DOMAIN}"
-
-
-      # ============================================================
-      # 11. 映射 noVNC 6901
-      # ============================================================
-
-      - name: Map noVNC Port 6901
+      - name: Map noVNC 6901
         shell: bash
         run: |
 
           set -e
 
-          echo "======================================"
-          echo "映射 noVNC 6901"
-          echo "======================================"
-
+          echo "映射 noVNC 6901..."
 
           cf map-route "$APP_NAME" "$DOMAIN" \
             --hostname "$APP_NAME" \
@@ -453,51 +336,59 @@ jobs:
 
 
           echo
-          echo "noVNC Web 端口：6901"
+          echo "noVNC 端口：6901"
 
 
-      # ============================================================
-      # 12. 启动 Debian
-      # ============================================================
+      # =====================================================
+      # 10. 启动应用
+      # =====================================================
 
       - name: Start Debian
         shell: bash
         run: |
 
-          set -e
+          set +e
 
           echo "======================================"
           echo "启动 Debian 11"
           echo "======================================"
 
-
           cf start "$APP_NAME"
+
+          START_RESULT=$?
 
 
           echo
-          echo "等待容器初始化..."
-
-          sleep 15
-
-
-      # ============================================================
-      # 13. 查看应用状态
-      # ============================================================
-
-      - name: Check App Status
-        shell: bash
-        run: |
-
           echo "======================================"
-          echo "Debian 11 应用状态"
+          echo "应用状态"
           echo "======================================"
 
-          cf app "$APP_NAME"
+          cf app "$APP_NAME" || true
 
 
-      # ============================================================
-      # 14. 等待应用正常运行
-      # ============================================================
+          echo
+          echo "======================================"
+          echo "最近日志"
+          echo "======================================"
+
+          cf logs "$APP_NAME" --recent || true
+
+
+          if [ "$START_RESULT" != "0" ]; then
+
+            echo
+            echo "======================================"
+            echo "Debian 启动失败"
+            echo "======================================"
+
+            exit 1
+
+          fi
+
+
+      # =====================================================
+      # 11. 等待容器
+      # =====================================================
 
       - name: Wait For Debian
         shell: bash
@@ -505,10 +396,7 @@ jobs:
 
           set +e
 
-          echo "======================================"
-          echo "等待 Debian 11 启动"
-          echo "======================================"
-
+          echo "等待 Debian 11..."
 
           SUCCESS=0
 
@@ -516,25 +404,22 @@ jobs:
           for i in $(seq 1 18); do
 
             echo
-            echo "--------------------------------------"
-            echo "检查：$i / 18"
-            echo "--------------------------------------"
-
+            echo "检查 $i / 18"
 
             STATUS=$(cf app "$APP_NAME" 2>/dev/null \
               | grep "requested state:" \
               | awk '{print $3}')
 
 
-            echo "当前状态：$STATUS"
+            echo "状态：$STATUS"
 
 
             if [ "$STATUS" = "started" ]; then
 
-              echo
-              echo "Debian 11 已启动"
-
               SUCCESS=1
+
+              echo
+              echo "Debian 11 已运行"
 
               break
 
@@ -549,43 +434,35 @@ jobs:
           if [ "$SUCCESS" != "1" ]; then
 
             echo
-            echo "======================================"
-            echo "Debian 启动失败或超时"
-            echo "======================================"
-
-
-            echo
-            echo "应用状态："
+            echo "启动检查失败"
 
             cf app "$APP_NAME" || true
-
 
             echo
             echo "最近日志："
 
             cf logs "$APP_NAME" --recent || true
 
-
             exit 1
 
           fi
 
 
-      # ============================================================
-      # 15. 最终检查
-      # ============================================================
+      # =====================================================
+      # 12. 最终输出
+      # =====================================================
 
-      - name: Final Check
+      - name: Final Output
         shell: bash
         run: |
 
           echo
-          echo "=============================================="
-          echo "          Debian 11 部署成功"
-          echo "=============================================="
+          echo "================================================"
+          echo "       Debian 11 极简 XFCE 部署完成"
+          echo "================================================"
 
           echo
-          echo "应用名称："
+          echo "应用："
           echo "$APP_NAME"
 
           echo
@@ -593,9 +470,12 @@ jobs:
           echo "$DOCKER_IMAGE"
 
           echo
-          echo "资源："
-          echo "内存：${{ github.event.inputs.memory }}"
-          echo "磁盘：${{ github.event.inputs.disk }}"
+          echo "内存："
+          echo "${{ github.event.inputs.memory }}"
+
+          echo
+          echo "磁盘："
+          echo "${{ github.event.inputs.disk }}"
 
           echo
           echo "桌面："
@@ -606,7 +486,7 @@ jobs:
           echo "1024x768"
 
           echo
-          echo "颜色深度："
+          echo "色深："
           echo "16 bit"
 
           echo
@@ -618,16 +498,15 @@ jobs:
           echo "5901"
 
           echo
-          echo "=============================================="
-          echo "浏览器访问地址："
+          echo "================================================"
+          echo "浏览器访问："
           echo
           echo "https://${APP_NAME}.${DOMAIN}"
-          echo
-          echo "=============================================="
+          echo "================================================"
 
           echo
-          echo "如果打开后出现 noVNC 登录页面，"
-          echo "使用镜像默认的 VNC 密码。"
+          echo "VNC 密码："
+          echo "headless"
 
           echo
-          echo "=============================================="
+          echo "================================================"
