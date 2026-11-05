@@ -65,8 +65,8 @@ on:
         default: ''
 
 env:
-  MEMORY: 1024M
-  DISK: 1024M
+  MEMORY: 4096M
+  DISK: 4096M
 
 jobs:
   deploy-app:
