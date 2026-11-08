@@ -65,8 +65,8 @@ on:
         default: ''
 
 env:
-  MEMORY: 4090M
-  DISK: 4090M
+  MEMORY: 4000M
+  DISK: 4000M
 
 jobs:
   deploy-app:
