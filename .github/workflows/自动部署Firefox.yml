@@ -57,8 +57,8 @@ on:
 
 env:
   DOCKER_IMAGE: ${{ secrets.DOCKER_IMAGE || 'ghcr.io/eooce/firefox:latest' }}
-  MEMORY: ${{ secrets.MEMORY || '4096M' }}
-  DISK: ${{ secrets.DISK || '4096M' }}
+  MEMORY: ${{ secrets.MEMORY || '4080M' }}
+  DISK: ${{ secrets.DISK || '4080M' }}
 
 jobs:
   deploy-app:
